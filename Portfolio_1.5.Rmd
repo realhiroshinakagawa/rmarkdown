@@ -1,0 +1,608 @@
+---
+title: 'Analysis of Beer Market U.S. '
+author: "H.Nakagawa　"
+date: "August 31, 2017"
+output:
+  github_document:
+    html_preview: TRUE
+  pdf_document:
+    toc: yes
+    toc_depth: '2'
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(ggplot2)
+library(Amelia)
+library(tidyr)
+library(psych)
+library(caret)
+library(randomForest)
+library(ROCR)
+library(gridExtra)
+library(scales)
+library(reshape2)
+library(rpart)
+library(rpart.plot)
+library(scales)
+library(psych)
+```
+---
+
+
+## 1. Introduction
+One of my school projects, applying analytics by exploring descriptive analysis and machine learning models.  As background for this case study project, I work as a brand manager for the Samuel Adams brand, charged with growing share by increasing retail distribution. In particular, I would look at a strategy of increasing distribution for the Sam Adams variety pack (a 12 pack of 12-ounce bottles).  
+
+
+## 2. Objective
+The primary decision is how beer customers end up with Samuel Adams Variety Pack or Competitors’ one. Below are some questions which I will find out throughout my analysis.  
+
+ - How does this compare to competitive variety packs?  
+ - What % of all US House Holds’s are buying Variety packs of beer?  
+ - If they were to decide to expand production and distribution of variety packs, how should they be configured and merchandised/marketed in-store? 
+
+I would like to complete an analysis that identifies the opportunity, which chains to target and what the important key drivers for purchasers in the market for beer variety pack.
+
+
+
+## 3. Data
+There are two types of the dataset for this analysis project: Beer purchase and list of GTIN number.   
+
+- The data for all Beer purchases is in the past 12 Months. (455,262 rows and  19 columns)
+
+
+```{r, load data, clean, include = TRUE}
+setwd("/Users/HiroshiNakagawa/R.")
+
+beer = read.csv("beer_sales.csv")
+
+str(beer)
+```
+
+
+- The list of GTIN# which should correspond with the key variety packs to indicate. (46 rows and 2 columns)
+
+
+
+```{r}
+gtin = read.csv("Variety_Pack_GTINs.csv",header = FALSE)
+
+colnames(gtin)[colnames(gtin)=="V1"] <- "vp.brand"
+colnames(gtin)[colnames(gtin)=="V2"] <- "vp.gtin"
+
+gtin = gtin[,1:2]
+
+
+gtin$vp.brand = as.character(gtin$vp.brand)
+gtin$vp.gtin = as.character(gtin$vp.gtin) 
+
+str(gtin)
+
+
+```
+
+
+##4. Data Cleaning
+Through this process, I will make up a final shape of data set which will be implemented into the analysis.  
+
+
+Find out which items are variety pack. To do so, I first subset items which have the key words of “Variety/ Var/ VTY” from the item description columns.
+
+
+```{r,warning=FALSE}
+##total number of beer brands in the market
+number_of_beer_brand = length(levels(as.factor(beer$Parent.Brand)))
+####
+
+###( PARENT BRAND = Samuel Adams AND DESCRIPTION CONTAINS ("VARIETY", "VTY", etc...)
+beer$Item.Description = as.character(beer$Item.Description)
+
+vty = grep("\\<VTY\\> | VARIETY| \\<VAR\\>", beer$Item.Description,ignore.case=TRUE)
+###Subset these something variety 
+vty_1 = beer[vty,]
+
+##name it as vty_1_last
+vty_1_last = vty_1%>%filter(Parent.Brand=="Samuel Adams")
+```
+
+Next, I referred to the other dataset which indicates GTIN number. This figure corresponds to each other and helps to find variety pack. 
+
+
+```{r,warning=FALSE}
+#Samuel Adams gtin
+colnames(gtin)[colnames(gtin)=="V1"] <- "vp.brand"
+colnames(gtin)[colnames(gtin)=="V2"] <- "vp.gtin"
+gtin$vp.brand = as.character(gtin$vp.brand)
+gtin$vp.gtin = as.character(gtin$vp.gtin) 
+
+g.v = gtin%>%filter(vp.brand=="Samuel Adams")
+g.v.c= g.v[,2]
+###Lets take away first 0's
+beer$GTIN =  gsub("(^|[^0-9])0+", "\\1", beer$GTIN, perl = TRUE)
+
+#Let's filter against Sam Adam's variaety pack from the gtin spread sheet. 
+#find out Samuel Adams Variety
+beer_gtin = beer%>%filter(GTIN %in% g.v.c)
+table(beer_gtin$GTIN)
+beer_gtin$Item.Description= as.character(beer_gtin$Item.Description)
+take_out = grep("\\<VTY\\> | VARIETY| \\<VAR\\>", beer_gtin$Item.Description, ignore.case=TRUE)
+
+###Got to leave these above out...otherwise "variety" will be doubling, because I have already
+#particualy filter against these key words...
+beer_gtin_last = beer_gtin[-take_out,]
+```
+
+
+Finally, combine all and make the entire dataset for the analysis project.  
+For convenience, I would like to set up an indicater call: VPI1 (Samuel Adams Variety Pack), VPI2(Samuel Adams_Non Variety Pack), VPI3 (Competitors Variety Pack), VPI4 (Competitors_Non Variety Pack).  
+These indicators class become the dependent variable for machine learning models later.
+
+
+
+```{r,warning=FALSE}
+
+###Seems like need to put them together
+###Eventually, this was right! haha, VP1
+VPI1= rbind(vty_1_last, beer_gtin_last)
+
+###basically VPI2 is not variety, but Sam Admas.
+just_sam = beer%>%filter(Parent.Brand=="Samuel Adams")
+
+VPI2 = setdiff(just_sam,VPI1)
+
+###VPI3 just variety - sam Adams
+just_var = beer[vty,]
+
+VPI3 = setdiff(just_var,VPI1)
+VPI_1_2_3 = rbind(VPI1,VPI2,VPI3)
+VPI4 = setdiff(beer,VPI_1_2_3)
+
+VPI1$Class = c("VPI1")
+VPI2$Class = c("VPI2")
+VPI3$Class = c("VPI3")
+VPI4$Class = c("VPI4")
+
+beer_df = rbind(VPI1,VPI2,VPI3,VPI4)
+```
+
+
+
+## 5. Columns Imputations
+After cleaning up the dataset, I chose which columns are relevant for the analysis of this project.
+This process also helps me figure out which columns will be applying to the machine learning models to archive the better accuracy. 
+
+
+```{r,warning=FALSE}
+###Columns Inputations
+#Only one factors and no meaning in this analysis
+###Just arrange it as order like original
+beer_df_1 = beer_df%>%arrange(User.ID)
+##Anyway lets change the date as.Date.
+beer_df_1$Date= as.Date(beer_df_1$Date, "%m/%d/%Y")
+
+beer_df_clean = beer_df_1%>%select(-Adult.Genders.On.Trip,-Trip.ID,-Sector,-Department,-Major.Category,-RIN,-Item.Dollars...Unit)
+
+###Lets leave out non_parent company
+beer_df_clean_1 = beer_df_clean%>%filter(!Parent.Brand == "N/A" )
+####Take out the $ sign
+beer_df_clean_1$Item.Dollars = as.numeric(gsub("[\\$,]", "",beer_df_clean_1$Item.Dollars))
+####Make the class as factor
+beer_df_clean_1$Class = as.factor(beer_df_clean_1$Class)
+####Make the month for seasonality
+beer_df_clean_2 = beer_df_clean_1%>%
+  mutate(month = format(Date, "%m"), year = format(Date, "%Y"), sales = Item.Dollars*Item.Units) %>%
+  group_by(month, year)
+beer_df_clean_2$month = as.factor(beer_df_clean_2$month)
+beer_df_clean_2$sales = as.numeric(beer_df_clean_2$sales)
+
+colnames(beer_df_clean_2)
+
+```
+
+
+These are relevant variables which I will implement for the analysis and models. So, finally let's dive into the analysis to get hands dirty!
+
+
+
+## 6.Data Exploration
+After these data cleaning, at last, I am going to explain what the data set tells us. Since this time my goal is how beer customers end up with Samuel Adams Variety Pack or Competitors’ one. The approach is applying the machine learning which is a classification model.
+
+
+Before diving into an analysis of each demographic features, I would like to go over how much the dataset is biased regarding the dependent variable for this analysis: Class.
+
+
+
+```{r}
+table(beer_df_clean_2$Class)
+
+```
+
+
+
+```{r,fig.width=10,fig.height=6}
+ggplot(beer_df_clean_2, aes(x = as.factor(Class))) +
+  geom_bar(aes(y = (..count..)/sum(..count..))) +
+  geom_text(aes(y = ((..count..)/sum(..count..)),label = scales::percent((..count..)/sum(..count..))), 
+            stat = "count", vjust = -0.25) +
+scale_y_continuous(labels = percent) +
+  labs(title = "Data: Class Variable Distribution", y = "Percent", x = "Class") + 
+  theme(legend.position="none")
+
+
+```
+As I expected, the dataset shows that over 98% of beer market accounts neither Samuel Adams or Variety Pack. The variety pack market here is only 7%.
+
+
+
+Below, I would also like to show how each category of beer transaction fluctuates over the seasonality, explaining us customers’ demands in the beer market, besides the scales.
+
+```{r,fig.width=10,fig.height=6}
+day_2 = beer_df_clean_2 %>% group_by(month,Class) %>% count()
+levels(day_2$Class) = c("VPI1:Sam Adams Var", "VPI2:Sam Adams","VPI3:Varriety", "VPI4:Other")
+
+day_2%>%ggplot(aes(x = month, y= log(n), group= Class, col=Class)) + 
+  labs(y = "log(Total_trip_number)",
+       title = 'Time Series x Demand') + geom_point() + geom_line()
+
+```
+
+It is obvious that how VPI4 is huge in the dataset; at the same time, how small the variety pack market is.
+One of the most interesting things from this seasonality diagram is that Samuel Adams Variety Pack becomes competitive from the August. There is likely to be that their Summers packs, October packs, and Winter packs work as an indicator.
+We will see what exactly is going through further analysis and our machine learning models will indicate something significant later.  
+
+
+
+###6-1. Demographic  
+
+Here I would like to look at how the population features vary between the two important classes of models.
+
+
+
+```{r,fig.width=10,fig.height=9}
+beer_df_clean_3 = beer_df_clean_2%>%filter(Class=="VPI1" | Class=="VPI3")
+beer_df_clean_3%>%ggplot(aes(x = Ethnicity, fill=Age..Generation.)) + 
+  geom_bar(position="dodge") + facet_grid(Class~Income..Group.) + ggtitle("Consumers Share") +  
+  labs(x ="Ethnicity" ,fill = "Generation") + 
+  theme(axis.text.x=element_text(angle=45, hjust=1))
+```
+
+For both categories, High Income / White people are prominent segments. The demographic distribution seems similar, which is good for building models.  
+
+
+
+###6-2. Brand Loyalty
+In the variety pack market, I would like to discover how many times people purchased variety pack and how many different names people were trying.
+
+
+```{r,fig.width=10,fig.height=6}
+Number_of_brands_trip_each_user = beer_df_clean_3 %>% 
+  group_by(User.ID) %>% summarise(Number_of_trip = n()) %>% arrange(desc(Number_of_trip))
+
+table(Number_of_brands_trip_each_user$Number_of_trip)
+
+ggplot(Number_of_brands_trip_each_user, aes(x = as.factor(Number_of_trip))) +
+  geom_bar(aes(y = (..count..)/sum(..count..))) +
+  geom_text(aes(y = ((..count..)/sum(..count..)),col="red" ,label = scales::percent((..count..)/sum(..count..))), 
+            stat = "count", vjust = -0.25) +
+  scale_y_continuous(labels = percent) +
+  labs(title = "# of variety pack purchase", y = "Percent", x = "# of purchase") + 
+  theme(legend.position="none")
+
+
+```
+
+
+```{r,fig.width=10,fig.height=6}
+Number_of_brands_each_user_1 = beer_df_clean_3 %>% 
+  group_by(User.ID, Parent.Brand) %>% select(User.ID,Parent.Brand) %>% 
+  summarise(Number_of_Brands = n())
+
+Number_of_brands_each_user_1$User.ID = as.factor(Number_of_brands_each_user_1$User.ID)
+
+
+Number_of_brands_each_user_2 = Number_of_brands_each_user_1%>%group_by(User.ID)%>%count()
+
+
+table(Number_of_brands_each_user_2$n)
+
+
+ggplot(Number_of_brands_each_user_2, aes(x = as.factor(n))) +
+  geom_bar(aes(y = (..count..)/sum(..count..))) +
+  geom_text(aes(y = ((..count..)/sum(..count..)), color="red",label = scales::percent((..count..)/sum(..count..))), 
+            stat = "count", vjust = -0.25) +
+  scale_y_continuous(labels = percent) +
+  labs(title = "# of different brands variety pack purchase", y = "Percent", x = "# of brands") + 
+  theme(legend.position="none")
+
+```
+
+People are likely to try variety pack just once a year, which means they are not variety seekers. While there are 12% of individuals who purchased twice for variety pack, there are only 4% of people who tried another brand. Again, these figures tell brand loyalty among variety pack purchasers.  
+
+
+###6-3. Market Share  
+
+The table below shows us the Top 10 Brands in the variety pack sales, besides the market share rate.
+
+
+```{r,fig.width=10,fig.height=8}
+MKST = beer_df_clean_3%>%group_by(Parent.Brand) %>% 
+  summarise(Total_Sale = sum(sales), Share_Rate = round(Total_Sale/ 52403,digit=2))%>%arrange(desc(Total_Sale))
+
+var_share_2 = MKST %>% mutate(Rank = paste0('#',dense_rank(desc(Total_Sale))))%>%head(n=10)
+print(var_share_2%>%select(Parent.Brand,Total_Sale, Share_Rate))
+
+ggplot(var_share_2, aes(x = reorder(Parent.Brand, Total_Sale), 
+                        y = Total_Sale, fill = Total_Sale)) +
+  geom_bar(stat='identity') + 
+  coord_flip() + labs(x = "Brand")
+
+```
+
+It is surprising that Samuel Adams accounts for 36% of the variety pack market. Since the difference between Mike's Beer is only 2%, the variety beer market is still competitive, though.  
+
+
+
+###6-4. Channel  
+I would also like to know what the distribution channel look like in the market. Below, the Top 10 distribution channels.
+
+
+```{r,fig.width=10,fig.height=8}
+Channel_analysis = beer_df_clean_3%>%group_by(Banner, Class, Channel)%>%summarise(Total_Purchase_Trip = n()) %>% 
+  arrange(desc(Total_Purchase_Trip))
+
+Channel_analysis_1 = Channel_analysis%>%filter(Class=="VPI1")%>% arrange(desc(Total_Purchase_Trip))%>% head(10)
+
+Channel_analysis_1_1 = Channel_analysis_1%>%ggplot(aes(x = Banner, y = Total_Purchase_Trip, fill=Channel)) + 
+  geom_bar(stat='identity') + ggtitle("Top 10 VPI1:Sam Adams Variety Pack") + 
+  theme(axis.title.y =element_blank()) + coord_flip()
+
+
+  
+Channel_analysis_2 = Channel_analysis%>%filter(Class=="VPI3")%>% 
+  arrange(desc(Total_Purchase_Trip))%>% head(10)
+
+Channel_analysis_2_2 = Channel_analysis_2%>%ggplot(aes(x = Banner, y = Total_Purchase_Trip, fill=Channel)) + 
+  geom_bar(stat='identity') + ggtitle("Top 10 VPI3: Competitors' Variety Pack") +
+  coord_flip()  + 
+  theme(axis.title.y =element_blank())
+
+grid.arrange(Channel_analysis_1_1, Channel_analysis_2_2,ncol=2)
+```
+
+Among the Samuel Adams Variety Pack customers, Walmart is the biggest distributors. Also, the share of Mass channel is significant: Target and Meijer. However, Food channel is still remarkable. 
+On the other hand, Competitors distribution is just Sam's Club. The number is again significant. At the same time, it is fascinating that the ratio of Food channel seems quite high.  
+
+
+###6-5. Price Analysis  
+Below here, I explore what the dependent variables look like regarding price. What I would like to know is the price distribution.  
+
+```{r,fig.width=10,fig.height=6}
+
+beer_df_clean_3%>%filter(Class=="VPI1"|Class=="VPI3")%>% group_by(Class) %>% 
+  summarise(min = min(Item.Dollars),
+            mean = mean(Item.Dollars),
+            median = median(Item.Dollars),
+            max = max(Item.Dollars))
+
+
+b_1 = ggplot(beer_df_clean_3, aes(x=Class, y=Item.Dollars, fill=Class)) + geom_jitter(alpha=.5) + 
+  geom_boxplot(color = "yellow", outlier.colour = NA, fill = NA)
+
+b_1
+```
+The scatter plots show that there are some outliers, and the boxplots inside expressed the average range respectively. The price distribution for each seems quite similar.  
+
+
+
+```{r,fig.width=10,fig.height=6}
+d_1 = ggplot(beer_df_clean_3, aes(x=Item.Dollars, fill=Class)) + geom_density(alpha=.5) + 
+  scale_x_continuous(breaks=seq(0,35,by=10),limits=c(0,35))
+
+d_1
+```
+Compared to the scatter plots and boxplots, this density plot seems much easier to understand how much overlapping for the price range for each. It is obvious that the average range of VPI3 is lower than VPI1: Samuel Adams Variety Pack seems more expensive than the competitors’ one. At the same time, the competitors have the wider price range. Their variety pack price points seem varied; there is no wonder since the VPI3 includes a lot of more brands.
+Finally, I will apply machine learning models by using these variable.  
+
+
+
+## 7. Models  
+Though this analysis, I will use classification models.  
+
+To make our machine learning models: decision tree and random forest, here I would like first to create dummy variables.  
+
+- Dependent Variable: Class (VPI1 / VPI3)
+- Independent Variable: Channel,month,Age..Generation.,Ethnicity,Income..Group.,Item.Dollars, Item.Units,Class
+
+
+```{r}
+
+#just let me call my models as RF since I will use it sooner or later
+RF_1 = beer_df_clean_1%>%mutate(month = format(Date, "%m"))
+RF_1$month = as.factor(RF_1$month)
+
+RF_1_models = RF_1%>%select(Channel,month,Age..Generation., Ethnicity,Income..Group.,
+                            Item.Dollars, Item.Units,Class)
+
+RF_1_models_1 = RF_1_models%>%filter(Class=="VPI1" | Class=="VPI3")
+RF_1_models_1$Class = droplevels(RF_1_models_1$Class)
+
+
+categorical.variables = RF_1_models_1%>%select(Channel:Income..Group.)
+dummy_categorical.variables = lapply(categorical.variables, function(x) dummy.code(x))
+ddf = as.data.frame(dummy_categorical.variables)
+
+RF_1_models_1_1 = RF_1_models_1%>%select(Item.Dollars,Item.Units,Class)
+
+data_1 = cbind(ddf, RF_1_models_1_1)
+
+data_1[,c(1:36)] = lapply(data_1[,c(1:36)], function(x) as.factor(x))
+```
+Since our models this time is classification models, creating dummy variables will lead us to better results such as more accurate models and specific key important factors. After creating dummy variables, I randomized the data set and split to train and test set 80:20 base.  
+
+
+
+```{r}
+set.seed(123)
+smp_size <- floor(0.8 * nrow(data_1))
+
+train_ind <- sample(seq_len(nrow(data_1)), size = smp_size)
+
+train <- data_1[train_ind, ]
+test <- data_1[-train_ind, ]
+```
+
+
+### 7-1. Decision Tree  
+
+The decision tree method represents a powerful approach among variables.The context of prediction relies on exploring how many variables can predict a particular target for the response.  
+
+```{r,fig.width=10,fig.height=9}
+
+my_tree_two <- rpart(Class ~., data = train, method = "class")
+
+
+rpart.plot(my_tree_two,type = 2, fallen.leaves = F, cex = 1, extra = 6)
+```
+
+With this decision tree model, it looks like that, in general, those who purchase than $18 at Mass channel tend to end up with competitors’ one.  
+
+
+Below the confusion matrix explains how accurate the tree model is.
+
+```{r}
+
+pred_rpart_1 = predict(my_tree_two, test, type="class")
+
+confusionMatrix(pred_rpart_1, test$Class)
+```
+The accuracy rate is 81.4%, which is good. However, the sensitivity, which is the number of true positives divided by the total number of elements that actually belong to the positive class, is lower: 61.2%.  
+
+This decision tree model seems good at predicting VPI3, rather than our primary focus, VPI1.  
+
+
+
+### 7-2. Random Forest  
+
+Random Forests is based on decision trees but proceeds by growing many trees, that is a decision tree forest. In ways, directly address the problem of model reproducibility, which is more generalized.  
+
+
+```{r,fig.width=10,fig.height=6}
+
+set.seed(123)
+rf_mod <- randomForest(Class ~., 
+                       data = train, 
+                       ntree = 1000,
+                       importance = TRUE)
+
+rf_mod
+```
+
+
+```{r,fig.width=10,fig.height=6}
+plot(rf_mod, ylim=c(0,1))
+legend('topright', colnames(rf_mod$err.rate), col=1:6, fill=1:6)
+
+
+```
+The black line shows the overall error rate which falls below 20%. The red and green lines show the error rate for ‘VPI1’ and ‘VPI3’ respectively.The model became stable after 100 trees trials.  
+
+```{r,fig.width=10,fig.height=6}
+
+pred.rf <- predict(rf_mod, newdata =test)
+confusionMatrix(pred.rf, test$Class)
+
+
+```
+
+I set up 1,000 number of trees, while the default 500. The confusion matrix from the train set model shows 79.9% of accuracy rate, which tells us that the decision tree model above seems a little overfitted.  
+Also, it seemed to be good at predicting competitors’ variety pack customers, rather than VPI1: Samuel Adams variety pack customers, again.  
+
+
+
+### 7-3. Key Important Variables  
+
+Finally, the most important thing from the Random Forest model is figuring our key variables. Interrupting the results of random forests is that the trees generated are not themselves interpreted: in other words, they are used to collectively rank the importance of variables in predicting the target of interest.  
+
+
+```{r,fig.width=10,fig.height=8}
+importance    <- importance(rf_mod)
+varImportance <- data.frame(Variables = row.names(importance), 
+                            Importance = round(importance[ ,'MeanDecreaseGini'],2))
+
+# Create a rank variable based on importance
+rankImportance <- varImportance %>%
+  mutate(Rank = paste0('#',dense_rank(desc(Importance)))) %>% 
+  arrange(desc(Importance))%>%head(n=20)
+
+# Use ggplot2 to visualize the relative importance of variables
+ggplot(rankImportance, aes(x = reorder(Variables, Importance), 
+                           y = Importance)) +
+  geom_bar(stat='identity', colour = 'black') +
+  geom_text(aes(x = Variables, y = 0.5, label = Rank),
+            hjust=0, vjust=0.55, size = 4, colour = 'red',
+            fontface = 'bold') +
+  labs(x = 'Variables', title = 'Relative Variable Importance Top 20') +
+  coord_flip()
+
+
+```
+
+
+The Relative Importance variable shows that the price is the most important factor, Channel Mass became the second most important variable. Interestingly, July and December are the two most vital months for customers to classify Samuel Adams Variety pack or others’ variety pack.   
+
+### 7-4. Model Evaluation  
+In the ROC curve, the true positive rate is plotted in function of the false positive rate. The closer the ROC curve is to the upper left corner, the higher the overall accuracy of the test. Area Under the Curve (AUC) is a measure of how well a parameter can distinguish between two class.  
+
+
+```{r,fig.width=10,fig.height=6}
+
+
+
+
+
+rf.pr = predict(rf_mod,type="prob",newdata=test)[,2]
+pred.rf.pred = prediction(rf.pr, test$Class)
+roc.rf.perf = performance(pred.rf.pred,"tpr","fpr")
+
+dt.pr = predict(my_tree_two,type="prob",newdata=test)[,2]
+pred.dt.pred = prediction(dt.pr, test$Class)
+roc.dt.perf = performance(pred.dt.pred,"tpr","fpr")
+
+
+plot( roc.rf.perf, col=2,lwd=2 )
+par(new=TRUE)
+plot( roc.dt.perf, col=3 ,lwd=2,main="ROC Curve for Tree models")
+abline(a=0,b=1,lwd=2,lty=2,col="gray")
+legend('bottomright',legend=c("RF model", "Decision Tree model"),col=2:3, fill=2:3,
+        cex=0.8,inset = .02)
+
+
+#### Area Under the Curve
+auc <- performance(pred.rf.pred, measure = "auc")
+auc <- auc@y.values[[1]]
+
+print(paste('AUC Random Forest Model',auc))
+
+auc_1 <- performance(pred.dt.pred, measure = "auc")
+auc_1 <- auc_1@y.values[[1]]
+
+print(paste('AUC Decision Tree Model',auc_1))
+
+
+
+```
+As the diagrams also show, the Random Forest model got about 3% higher AUC rate than the decision tree model. Therefore we can say Random Forest model is better model for the predictive classification.  
+
+
+
+## 8. Conclusion  
+Throughout these processes, I could figure out the demographics of the variety pack in the beer market in the U.S. They are price sensitive, and where they purchase works as one of the key factors to predict if they are Samuel Adams Variety Pack customers. While the Random Forest tells the more generalized analysis to predict the relevant variables, the decision tree explains how consumers respond among each variable. Both models attained over 80% accuracy to predict the classification.  
+  
+
+
+
+
+乾杯 !!  
+
